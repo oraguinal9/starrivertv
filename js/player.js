@@ -472,7 +472,7 @@ function initPlayer(videoUrl) {
             crossOrigin: 'anonymous',
         },
         customType: {
-            m3u8: async function (video, url) {
+            m3u8: function (video, url) {
                 // 清理之前的HLS实例
                 if (currentHls && currentHls.destroy) {
                     try {
@@ -509,12 +509,8 @@ function initPlayer(videoUrl) {
                     }
                 });
 
-                // 通过代理加载 m3u8，避免 CORS 问题
-                let proxiedUrl = PROXY_URL + encodeURIComponent(url);
-                if (window.ProxyAuth && window.ProxyAuth.addAuthToProxyUrl) {
-                    proxiedUrl = await window.ProxyAuth.addAuthToProxyUrl(proxiedUrl);
-                }
-                hls.loadSource(proxiedUrl);
+                // 直接加载 m3u8（不代理，减少延迟）
+                hls.loadSource(url);
                 hls.attachMedia(video);
 
                 // enable airplay, from https://github.com/video-dev/hls.js/issues/5989
@@ -769,30 +765,16 @@ class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
         super(config);
         const load = this.load.bind(this);
         this.load = function (context, config, callbacks) {
-            // 为所有代理请求添加鉴权参数
-            if (context.url && context.url.startsWith('/proxy/')) {
-                // 获取当前存储的鉴权哈希和时间戳
-                const hash = localStorage.getItem('proxyAuthHash');
-                if (hash && !context.url.includes('auth=')) {
-                    const timestamp = Date.now();
-                    const sep = context.url.includes('?') ? '&' : '?';
-                    context.url = context.url + sep + 'auth=' + encodeURIComponent(hash) + '&t=' + timestamp;
-                }
-            }
-
-            // 拦截manifest和level请求
+            // 拦截manifest和level请求进行广告过滤
             if (context.type === 'manifest' || context.type === 'level') {
                 const onSuccess = callbacks.onSuccess;
                 callbacks.onSuccess = function (response, stats, context) {
-                    // 如果是m3u8文件，处理内容以移除广告分段
                     if (response.data && typeof response.data === 'string') {
-                        // 过滤掉广告段 - 实现更精确的广告过滤逻辑
                         response.data = filterAdsFromM3U8(response.data, true);
                     }
                     return onSuccess(response, stats, context);
                 };
             }
-            // 执行原始load方法
             load(context, config, callbacks);
         };
     }
