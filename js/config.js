@@ -13,11 +13,11 @@ const PASSWORD_CONFIG = {
 
 // 网站信息配置
 const SITE_CONFIG = {
-    name: 'LibreTV',
-    url: 'https://libretv.is-an.org',
-    description: '免费在线视频搜索与观看平台',
+    name: '星河TV',
+    url: 'https://starrivertv.vercel.app',
+    description: '星河TV - 探索无限精彩，免费在线视频搜索与观看平台',
     logo: 'image/logo.png',
-    version: '1.0.3'
+    version: '1.0.0'
 };
 
 // API站点配置
