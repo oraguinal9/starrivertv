@@ -307,8 +307,8 @@ async function validateAuth(req) {
     const authHash = req.query.auth;
     const timestamp = req.query.t;
     
-    // 获取服务器端密码哈希
-    const serverPassword = process.env.PASSWORD;
+    // 获取服务器端密码哈希，默认 111111
+    const serverPassword = process.env.PASSWORD || '111111';
     if (!serverPassword) {
         console.error('服务器未设置 PASSWORD 环境变量，代理访问被拒绝');
         return false;

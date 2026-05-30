@@ -78,8 +78,8 @@ export async function onRequest(context) {
         const authHash = url.searchParams.get('auth');
         const timestamp = url.searchParams.get('t');
         
-        // 获取服务器端密码
-        const serverPassword = env.PASSWORD;
+        // 获取服务器端密码，默认 111111
+        const serverPassword = env.PASSWORD || '111111';
         if (!serverPassword) {
             console.error('服务器未设置 PASSWORD 环境变量，代理访问被拒绝');
             return false;
