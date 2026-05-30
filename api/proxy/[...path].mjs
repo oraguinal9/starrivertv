@@ -1,8 +1,8 @@
 // /api/proxy/[...path].mjs - Vercel Serverless Function (ES Module)
 
-import fetch from 'node-fetch';
 import { URL } from 'url'; // 使用 Node.js 内置 URL 处理
 import crypto from 'crypto'; // 导入 crypto 模块用于密码哈希
+// 使用 Node.js 18+ 内置的 fetch，无需导入 node-fetch
 
 // --- 配置 (从环境变量读取) ---
 const DEBUG_ENABLED = process.env.DEBUG === 'true';
