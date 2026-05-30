@@ -472,7 +472,7 @@ function initPlayer(videoUrl) {
             crossOrigin: 'anonymous',
         },
         customType: {
-            m3u8: function (video, url) {
+            m3u8: async function (video, url) {
                 // 清理之前的HLS实例
                 if (currentHls && currentHls.destroy) {
                     try {
@@ -509,8 +509,12 @@ function initPlayer(videoUrl) {
                     }
                 });
 
-                // 直接加载 m3u8（不代理，减少延迟）
-                hls.loadSource(url);
+                // 通过代理加载 m3u8，避免 CORS
+                let proxiedUrl = PROXY_URL + encodeURIComponent(url);
+                if (window.ProxyAuth && window.ProxyAuth.addAuthToProxyUrl) {
+                    proxiedUrl = await window.ProxyAuth.addAuthToProxyUrl(proxiedUrl);
+                }
+                hls.loadSource(proxiedUrl);
                 hls.attachMedia(video);
 
                 // enable airplay, from https://github.com/video-dev/hls.js/issues/5989
@@ -759,13 +763,21 @@ function initPlayer(videoUrl) {
     }, 10000);
 }
 
-// 自定义M3U8 Loader用于过滤广告
+// 自定义M3U8 Loader - 代理鉴权 + 广告过滤
 class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
     constructor(config) {
         super(config);
         const load = this.load.bind(this);
         this.load = function (context, config, callbacks) {
-            // 拦截manifest和level请求进行广告过滤
+            // 为代理 URL 添加鉴权参数（包括音视频分片）
+            if (context.url && context.url.startsWith('/proxy/')) {
+                const hash = localStorage.getItem('proxyAuthHash');
+                if (hash && !context.url.includes('auth=')) {
+                    const sep = context.url.includes('?') ? '&' : '?';
+                    context.url = context.url + sep + 'auth=' + encodeURIComponent(hash) + '&t=' + Date.now();
+                }
+            }
+            // 广告过滤
             if (context.type === 'manifest' || context.type === 'level') {
                 const onSuccess = callbacks.onSuccess;
                 callbacks.onSuccess = function (response, stats, context) {
