@@ -123,11 +123,10 @@ function validateProxyAuth(req) {
   const authHash = req.query.auth;
   const timestamp = req.query.t;
   
-  // 获取服务器端密码哈希
+  // 获取服务器端密码，空密码时跳过鉴权
   const serverPassword = config.password;
   if (!serverPassword) {
-    console.error('服务器未设置 PASSWORD 环境变量，代理访问被拒绝');
-    return false;
+    return true; // 无密码，允许所有代理请求
   }
   
   // 使用 crypto 模块计算 SHA-256 哈希
