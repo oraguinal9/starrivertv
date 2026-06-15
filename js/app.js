@@ -728,6 +728,12 @@ async function search() {
             });
         }
 
+        // 构建图片代理URL，绕过CDN防盗链（Referer检测导致封面黑屏）
+        function proxyImageUrl(directUrl) {
+            if (!directUrl || !directUrl.startsWith('http')) return directUrl;
+            return '/img/' + encodeURIComponent(directUrl);
+        }
+
         // 添加XSS保护，使用textContent和属性转义
         const safeResults = allResults.map(item => {
             const safeId = item.vod_id ? item.vod_id.toString().replace(/[^\w-]/g, '') : '';
@@ -745,17 +751,19 @@ async function search() {
 
             // 修改为水平卡片布局，图片在左侧，文本在右侧，并优化样式
             const hasCover = item.vod_pic && item.vod_pic.startsWith('http');
+            // 封面图先直连（no-referrer绕过部分防盗链），失败则走服务器代理
+            const proxiedCover = hasCover ? proxyImageUrl(item.vod_pic) : '';
 
             return `
-                <div class="card-hover bg-[#111] rounded-lg overflow-hidden cursor-pointer transition-all hover:scale-[1.02] h-full shadow-sm hover:shadow-md" 
+                <div class="card-hover bg-[#111] rounded-lg overflow-hidden cursor-pointer transition-all hover:scale-[1.02] h-full shadow-sm hover:shadow-md"
                      onclick="showDetails('${safeId}','${safeName}','${sourceCode}')" ${apiUrlAttr}>
                     <div class="flex h-full">
                         ${hasCover ? `
                         <div class="relative flex-shrink-0 search-card-img-container">
-                            <img src="${item.vod_pic}" alt="${safeName}" 
-                                 class="h-full w-full object-cover transition-transform hover:scale-110" 
-                                 onerror="this.onerror=null; this.src='https://via.placeholder.com/300x450?text=无封面'; this.classList.add('object-contain');" 
-                                 loading="lazy">
+                            <img src="${item.vod_pic}" alt="${safeName}"
+                                 class="h-full w-full object-cover transition-transform hover:scale-110"
+                                 onerror="this.onerror=null; this.src='${proxiedCover}';"
+                                 loading="lazy" referrerpolicy="no-referrer">
                             <div class="absolute inset-0 bg-gradient-to-r from-black/30 to-transparent"></div>
                         </div>` : ''}
                         
