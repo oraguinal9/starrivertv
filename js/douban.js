@@ -528,17 +528,16 @@ function renderDoubanCards(data, container) {
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;');
             
-            // 处理图片URL
-            // 1. 直接使用豆瓣图片URL (添加no-referrer属性)
+            // 处理图片URL — 豆瓣防盗链极严（服务器返回418/403）
+            // 只能用 referrerpolicy="no-referrer" 在浏览器端绕过，服务器代理无效
             const originalCoverUrl = item.cover;
-            
-            // 2. 也准备代理URL作为备选（使用带缓存的/img/端点）
+            // 用 img/ 代理作 fallback（服务器被豆瓣封，实际会返回占位图）
             const proxiedCoverUrl = '/img/' + encodeURIComponent(originalCoverUrl);
-            
+
             // 为不同设备优化卡片布局
             card.innerHTML = `
                 <div class="relative w-full aspect-[2/3] overflow-hidden cursor-pointer" onclick="fillAndSearchWithDouban('${safeTitle}')">
-                    <img src="${originalCoverUrl}" alt="${safeTitle}" 
+                    <img src="${originalCoverUrl}" alt="${safeTitle}"
                         class="w-full h-full object-cover transition-transform duration-500 hover:scale-110"
                         onerror="this.onerror=null; this.src='${proxiedCoverUrl}'; this.classList.add('object-contain');"
                         loading="lazy" referrerpolicy="no-referrer">

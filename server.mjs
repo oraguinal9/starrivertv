@@ -274,10 +274,18 @@ app.use('/img', async (req, res) => {
     res.send(Buffer.from(axiosResponse.data));
   } catch (error) {
     console.error('图片代理错误:', error.message);
-    // 返回占位图（深色背景+文字），保持视觉一致性
+    // 返回可见占位图，提示封面不可用
     const placeholderSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="450" viewBox="0 0 300 450">
-      <rect width="300" height="450" fill="#1a1a2e"/>
-      <text x="150" y="225" text-anchor="middle" fill="#555" font-size="16" font-family="sans-serif">暂无封面</text>
+      <defs>
+        <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" style="stop-color:#2d2d44"/>
+          <stop offset="100%" style="stop-color:#1a1a2e"/>
+        </linearGradient>
+      </defs>
+      <rect width="300" height="450" fill="url(#bg)"/>
+      <rect x="65" y="175" width="170" height="100" rx="8" fill="none" stroke="#666" stroke-width="1" stroke-dasharray="4,4"/>
+      <text x="150" y="215" text-anchor="middle" fill="#888" font-size="14" font-family="sans-serif">📷</text>
+      <text x="150" y="240" text-anchor="middle" fill="#777" font-size="13" font-family="sans-serif">暂无封面</text>
     </svg>`;
     res.set({
       'Content-Type': 'image/svg+xml',
