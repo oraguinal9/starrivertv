@@ -223,8 +223,12 @@ app.get('/proxy/:encodedUrl', async (req, res) => {
 
 // 图片代理端点 — 解决封面图防盗链（hotlink protection）黑屏问题
 // 第三方图片CDN检测Referer非自家域名时返回空白/黑图
-// 通过服务器转发可以去掉Referer，绕过防盗链
-app.get('/img/*', async (req, res) => {
+// 通过服务器转发并设置同源Referer，绕过防盗链
+// 使用 app.use 而非 app.get 避免 Express 5 path-to-regexp 通配符兼容问题
+app.use('/img', async (req, res) => {
+  // 只处理 GET 请求（img标签加载），其他方法跳过
+  if (req.method !== 'GET') return res.status(405).send('Method Not Allowed');
+
   try {
     // 验证鉴权（与 /proxy/ 一致）
     if (!validateProxyAuth(req)) {
@@ -234,9 +238,9 @@ app.get('/img/*', async (req, res) => {
       });
     }
 
-    // 从路径中提取编码后的URL
-    const encodedUrl = req.path.replace('/img/', '');
-    if (!encodedUrl) {
+    // 从路径中提取编码后的URL（Express app.use 已剥离 /img 前缀，req.path 以 / 开头）
+    const encodedUrl = req.path.substring(1);
+    if (!encodedUrl || encodedUrl === '/') {
       return res.status(400).send('缺少图片URL');
     }
 
@@ -247,18 +251,18 @@ app.get('/img/*', async (req, res) => {
     }
 
     // 获取图片（发送同源Referer绕过CDN防盗链）
-    const response = await axios({
+    const axiosResponse = await axios({
       method: 'get',
       url: targetUrl,
       responseType: 'arraybuffer',
       timeout: 8000,
       headers: {
         'User-Agent': config.userAgent,
-        'Referer': new URL(targetUrl).origin  // 发送同源Referer绕过防盗链
+        'Referer': new URL(targetUrl).origin
       }
     });
 
-    const contentType = response.headers['content-type'] || 'image/jpeg';
+    const contentType = axiosResponse.headers['content-type'] || 'image/jpeg';
 
     // 设置缓存（图片可缓存1周）
     res.set({
@@ -267,7 +271,7 @@ app.get('/img/*', async (req, res) => {
       'Access-Control-Allow-Origin': '*'
     });
 
-    res.send(Buffer.from(response.data));
+    res.send(Buffer.from(axiosResponse.data));
   } catch (error) {
     console.error('图片代理错误:', error.message);
     // 返回占位图（深色背景+文字），保持视觉一致性
@@ -282,6 +286,9 @@ app.get('/img/*', async (req, res) => {
     res.send(Buffer.from(placeholderSvg));
   }
 });
+
+// 确保 /img 子路径不被 express.static 捕获
+app.disable('strict routing');
 
 app.use(express.static(path.join(__dirname), {
   maxAge: config.cacheMaxAge
