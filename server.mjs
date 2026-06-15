@@ -295,6 +295,81 @@ app.use('/img', async (req, res) => {
   }
 });
 
+// ============================================================
+// Sitemap 端点 — 帮助搜索引擎发现和收录所有搜索页面
+// ============================================================
+let sitemapCache = { xml: null, time: 0 };
+const SITEMAP_TTL = 6 * 60 * 60 * 1000; // 缓存6小时
+
+app.get('/sitemap.xml', async (req, res) => {
+  try {
+    const now = Date.now();
+    if (sitemapCache.xml && (now - sitemapCache.time) < SITEMAP_TTL) {
+      res.set('Content-Type', 'application/xml');
+      return res.send(sitemapCache.xml);
+    }
+
+    // 基础静态页面
+    const staticPages = [
+      { url: '/', priority: '1.0', changefreq: 'daily' },
+      { url: '/about', priority: '0.5', changefreq: 'monthly' },
+    ];
+
+    // 基础热门关键词（兜底，即使豆瓣API挂了也有内容）
+    const baseTerms = [
+      '庆余年', '狂飙', '三体', '繁花', '漫长的季节', '隐秘的角落',
+      '开端', '莲花楼', '长相思', '苍兰诀', '星汉灿烂', '梦华录',
+      '唐朝诡事录', '警察荣誉', '人世间', '风吹半夏', '县委大院',
+      '去有风的地方', '少年歌行', '猎冰', '度华年', '长风渡',
+      '流浪地球', '满江红', '封神', '孤注一掷', '消失的她',
+      '权力的游戏', '绝命毒师', '怪奇物语', '黑暗荣耀', '鱿鱼游戏',
+      '海贼王', '火影忍者', '进击的巨人', '鬼灭之刃', '一人之下',
+      '新闻女王', '与凤行', '追风者', '城中之城', '玫瑰的故事',
+    ];
+
+    // 尝试从豆瓣获取热门榜单
+    let doubanTerms = [];
+    try {
+      const fetchHot = async (type, tag) => {
+        const url = `https://movie.douban.com/j/search_subjects?type=${type}&tag=${encodeURIComponent(tag)}&sort=recommend&page_limit=30`;
+        const resp = await axios({ method: 'get', url, timeout: 8000,
+          headers: { 'User-Agent': config.userAgent } });
+        return (resp.data.subjects || []).map(s => s.title).filter(Boolean);
+      };
+      const movies = await fetchHot('movie', '热门');
+      const tvs = await fetchHot('tv', '热门');
+      doubanTerms = [...new Set([...movies, ...tvs])];
+      console.log(`[sitemap] 豆瓣获取: ${movies.length}部电影, ${tvs.length}部剧`);
+    } catch (e) {
+      console.log('[sitemap] 豆瓣API失败，使用基础词表:', e.message);
+    }
+
+    // 合并去重
+    const allTerms = [...new Set([...baseTerms, ...doubanTerms])];
+
+    // 生成XML
+    const urlEntries = [
+      ...staticPages.map(p =>
+        `  <url><loc>https://xinghetvs.top${p.url}</loc><changefreq>${p.changefreq}</changefreq><priority>${p.priority}</priority></url>`),
+      ...allTerms.map(term =>
+        `  <url><loc>https://xinghetvs.top/s=${encodeURIComponent(term)}</loc><changefreq>weekly</changefreq><priority>0.8</priority></url>`),
+    ];
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:mobile="http://www.google.com/schemas/sitemap-mobile/1.0">
+${urlEntries.join('\n')}
+</urlset>`;
+
+    sitemapCache = { xml, time: now };
+    res.set('Content-Type', 'application/xml; charset=utf-8');
+    res.send(xml);
+  } catch (err) {
+    console.error('[sitemap] 生成失败:', err.message);
+    res.status(500).send('Sitemap generation error');
+  }
+});
+
 // 确保 /img 子路径不被 express.static 捕获
 app.disable('strict routing');
 
