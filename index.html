@@ -200,11 +200,17 @@
                 <div class="w-full max-w-2xl">
                     <div class="flex items-stretch mb-3 h-14 shadow-lg rounded-lg overflow-hidden">
                         <!-- 首页按钮 -->
-                        <button onclick="resetToHome()" 
-                                class="w-20 sm:w-24 flex items-center justify-center bg-white text-black font-medium hover:bg-gray-200 transition-colors" 
+                        <button onclick="resetToHome()"
+                                class="w-20 sm:w-24 flex items-center justify-center bg-white text-black font-medium hover:bg-gray-200 transition-colors"
                                 aria-label="返回首页" title="返回首页">
                             首页
                         </button>
+                        <!-- 电视直播按钮 -->
+                        <a href="/live.html"
+                           class="w-24 sm:w-28 flex items-center justify-center bg-[#e11d48] hover:bg-[#be123c] text-white font-medium transition-colors no-underline"
+                           title="电视直播">
+                            📺 直播
+                        </a>
                         <!-- 搜索输入 -->
                         <input type="text" 
                                id="searchInput" 

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📺 电视直播 - 星河TV</title>
+    <meta name="description" content="星河TV电视直播 - 免费在线观看CCTV、卫视、地方台等数百个电视频道">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="css/styles.css">
+    <script src="libs/hls.min.js"></script>
+    <script src="js/proxy-auth.js"></script>
+    <style>
+        body { background: #0a0a0f; color: #e4e4e7; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+        .channel-card {
+            background: #111; border: 1px solid #222; border-radius: 12px;
+            padding: 16px; cursor: pointer; transition: all .2s;
+        }
+        .channel-card:hover { background: #1a1a1a; border-color: #e11d48; transform: translateY(-2px); }
+        .channel-card.playing { border-color: #e11d48; background: #1a0a0f; }
+        .tab-btn { padding: 8px 20px; border-radius: 20px; font-size: 14px; cursor: pointer; transition: all .2s; }
+        .tab-btn.active { background: #e11d48; color: #fff; }
+        .tab-btn:not(.active) { background: #222; color: #999; }
+        .tab-btn:not(.active):hover { background: #333; color: #ccc; }
+        #player-container { background: #000; border-radius: 16px; overflow: hidden; }
+    </style>
+</head>
+<body class="min-h-screen">
+
+<div class="container mx-auto px-4 py-6 max-w-6xl">
+
+    <!-- 头部 -->
+    <header class="flex items-center justify-between mb-8 mt-4">
+        <div class="flex items-center gap-4">
+            <a href="/" class="text-3xl font-bold bg-gradient-to-r from-rose-400 via-red-500 to-pink-500 bg-clip-text text-transparent no-underline">星河TV</a>
+            <span class="text-gray-500 text-lg">|</span>
+            <span class="text-xl font-bold">📺 电视直播</span>
+        </div>
+        <a href="/" class="text-gray-400 hover:text-white transition-colors">← 返回搜索</a>
+    </header>
+
+    <!-- 播放器 -->
+    <div id="player-container" class="mb-6 hidden">
+        <div class="flex items-center justify-between p-3 bg-[#111] border-b border-gray-800">
+            <span id="current-channel-name" class="font-medium"></span>
+            <button onclick="closePlayer()" class="text-gray-400 hover:text-white px-3 py-1 rounded-lg hover:bg-[#333] transition-colors">✕ 关闭</button>
+        </div>
+        <video id="player" controls autoplay class="w-full aspect-video" style="max-height:60vh;"></video>
+    </div>
+
+    <!-- 标签切换 -->
+    <div class="flex flex-wrap gap-3 mb-6" id="tabs">
+        <button class="tab-btn active" data-tab="all">全部</button>
+        <button class="tab-btn" data-tab="cctv">📡 CCTV</button>
+        <button class="tab-btn" data-tab="weishi">📺 卫视</button>
+        <button class="tab-btn" data-tab="other">🌏 其他</button>
+    </div>
+
+    <!-- 加载状态 -->
+    <div id="loading" class="text-center py-20">
+        <div class="text-gray-500 text-lg mb-2">正在加载频道列表...</div>
+        <div class="text-gray-600 text-sm" id="loading-status"></div>
+    </div>
+
+    <!-- 频道列表 -->
+    <div id="channel-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3"></div>
+
+    <!-- 空状态 -->
+    <div id="empty" class="text-center py-20 hidden">
+        <div class="text-5xl mb-4">📡</div>
+        <div class="text-gray-400">暂无频道数据</div>
+        <button onclick="loadChannels()" class="mt-4 px-4 py-2 bg-[#222] hover:bg-[#333] text-gray-300 rounded-lg transition-colors">重新加载</button>
+    </div>
+
+</div>
+
+<script>
+let allChannels = [];
+let currentTab = 'all';
+let currentChannel = null;
+
+// HLS.js 实例
+let hls = null;
+
+async function loadChannels() {
+    const loading = document.getElementById('loading');
+    const grid = document.getElementById('channel-grid');
+    const status = document.getElementById('loading-status');
+
+    loading.style.display = 'block';
+    grid.innerHTML = '';
+    status.textContent = '获取直播列表...';
+
+    try {
+        const resp = await fetch('/api/live');
+        const data = await resp.json();
+        allChannels = data.channels || [];
+        status.textContent = '加载了 ' + allChannels.length + ' 个频道';
+        setTimeout(() => { loading.style.display = 'none'; renderChannels(); }, 300);
+    } catch (e) {
+        loading.style.display = 'none';
+        document.getElementById('empty').classList.remove('hidden');
+        console.error('加载频道失败:', e);
+    }
+}
+
+function renderChannels() {
+    const grid = document.getElementById('channel-grid');
+    const empty = document.getElementById('empty');
+
+    let filtered = allChannels;
+    if (currentTab === 'cctv') filtered = allChannels.filter(c => /CCTV/i.test(c.name));
+    if (currentTab === 'weishi') filtered = allChannels.filter(c => /卫视/.test(c.name));
+    if (currentTab === 'other') filtered = allChannels.filter(c => !/CCTV/i.test(c.name) && !/卫视/.test(c.name));
+
+    if (filtered.length === 0) {
+        grid.innerHTML = '';
+        empty.classList.remove('hidden');
+        return;
+    }
+    empty.classList.add('hidden');
+
+    grid.innerHTML = filtered.map((ch, i) => {
+        const isPlaying = currentChannel && currentChannel.url === ch.url;
+        return '<div class="channel-card' + (isPlaying ? ' playing' : '') + '" onclick="playChannel(\'' + i + '\',\'' + currentTab + '\')">' +
+            '<div class="text-sm font-medium truncate mb-1">' + (ch.name || '未知频道').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>' +
+            '<div class="text-xs text-gray-500 truncate">' + (ch.group || '电视直播') + '</div>' +
+            '</div>';
+    }).join('');
+}
+
+function playChannel(index, tab) {
+    let filtered = allChannels;
+    if (tab === 'cctv') filtered = allChannels.filter(c => /CCTV/i.test(c.name));
+    if (tab === 'weishi') filtered = allChannels.filter(c => /卫视/.test(c.name));
+    if (tab === 'other') filtered = allChannels.filter(c => !/CCTV/i.test(c.name) && !/卫视/.test(c.name));
+
+    const ch = filtered[parseInt(index)];
+    if (!ch) return;
+
+    currentChannel = ch;
+    document.getElementById('current-channel-name').textContent = '📺 ' + ch.name;
+    document.getElementById('player-container').classList.remove('hidden');
+
+    const video = document.getElementById('player');
+
+    // 销毁旧 HLS 实例
+    if (hls) { hls.destroy(); hls = null; }
+
+    const url = ch.url;
+    if (url.endsWith('.m3u8') && Hls.isSupported()) {
+        // HLS 播放
+        hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+        hls.loadSource(url);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+        hls.on(Hls.Events.ERROR, (event, data) => {
+            if (data.fatal) {
+                console.warn('HLS错误, 尝试直连:', data.type);
+                hls.destroy();
+                hls = null;
+                video.src = url;
+                video.play().catch(() => {});
+            }
+        });
+    } else {
+        // 直连播放
+        video.src = url;
+        video.play().catch(() => {});
+    }
+    video.scrollIntoView({ behavior: 'smooth' });
+    renderChannels();
+}
+
+function closePlayer() {
+    const video = document.getElementById('player');
+    if (hls) { hls.destroy(); hls = null; }
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    currentChannel = null;
+    document.getElementById('player-container').classList.add('hidden');
+    renderChannels();
+}
+
+// 标签切换
+document.getElementById('tabs').addEventListener('click', function(e) {
+    if (e.target.classList.contains('tab-btn')) {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        e.target.classList.add('active');
+        currentTab = e.target.dataset.tab;
+        renderChannels();
+    }
+});
+
+// 页面加载
+loadChannels();
+</script>
+
+</body>
+</html>

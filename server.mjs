@@ -370,6 +370,76 @@ ${urlEntries.join('\n')}
   }
 });
 
+// ============================================================
+// IPTV 电视直播 — 从 GitHub 开源源获取 CCTV/卫视 m3u8 列表
+// ============================================================
+let iptvCache = { channels: [], time: 0 };
+const IPTV_TTL = 24 * 60 * 60 * 1000; // 缓存24小时
+const IPTV_SOURCES = [
+  'https://raw.githubusercontent.com/iptv-org/iptv/master/streams/cn.m3u',
+  'https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u',
+];
+
+async function refreshIPTV() {
+  const allChannels = [];
+  for (const src of IPTV_SOURCES) {
+    try {
+      const resp = await axios({ method: 'get', url: src, timeout: 15000,
+        headers: { 'User-Agent': config.userAgent } });
+      const lines = resp.data.split('\n');
+      for (let i = 0; i < lines.length - 1; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('#EXTINF:')) {
+          const url = lines[i + 1].trim();
+          if (!url.startsWith('http')) continue;
+          // 解析频道名和ID
+          const nameMatch = line.match(/,(.+)$/);
+          const idMatch = line.match(/tvg-id="([^"]*)"/);
+          const logoMatch = line.match(/tvg-logo="([^"]*)"/);
+          const groupMatch = line.match(/group-title="([^"]*)"/);
+          const name = nameMatch ? nameMatch[1].trim() : '未知频道';
+          const id = idMatch ? idMatch[1] : '';
+          const logo = logoMatch ? logoMatch[1] : '';
+          const group = groupMatch ? groupMatch[1] : '';
+          // 过滤掉国外台和低质量源
+          allChannels.push({ id, name, url, logo, group, source: src });
+        }
+      }
+    } catch (e) {
+      console.log('[iptv] 源获取失败: ' + src + ' - ' + e.message);
+    }
+  }
+  // 去重（按 name+url 组合）
+  const seen = new Set();
+  const deduped = allChannels.filter(c => {
+    const key = c.name + c.url.slice(0, 60);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  // 分类排序：CCTV > 卫视 > 其他
+  const cctv = deduped.filter(c => /CCTV/i.test(c.name));
+  const weishi = deduped.filter(c => !/CCTV/i.test(c.name) && /卫视/.test(c.name));
+  const others = deduped.filter(c => !/CCTV/i.test(c.name) && !/卫视/.test(c.name));
+  const sorted = [...cctv, ...weishi, ...others];
+  iptvCache = { channels: sorted, time: Date.now() };
+  console.log('[iptv] 频道更新: ' + sorted.length + ' 个 (CCTV' + cctv.length + ' 卫视' + weishi.length + ' 其他' + others.length + ')');
+}
+
+app.get('/api/live', async (req, res) => {
+  try {
+    if (Date.now() - iptvCache.time > IPTV_TTL) {
+      await refreshIPTV();
+    }
+    res.json({ channels: iptvCache.channels, updated: iptvCache.time });
+  } catch (e) {
+    res.json({ channels: [], error: e.message });
+  }
+});
+
+// 启动时预加载
+refreshIPTV().catch(() => {});
+
 // 确保 /img 子路径不被 express.static 捕获
 app.disable('strict routing');
 
