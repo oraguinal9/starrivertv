@@ -18,6 +18,9 @@ function isPasswordProtected() {
  * 为了安全考虑，所有部署都必须设置密码
  */
 function isPasswordRequired() {
+    // 空密码时跳过保护
+    const p = window.__ENV__ && window.__ENV__.PASSWORD;
+    if (!p || p === '') return false;
     return !isPasswordProtected();
 }
 

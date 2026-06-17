@@ -424,14 +424,48 @@ async function refreshIPTV() {
   const sorted = [...cctv, ...weishi, ...others];
   iptvCache = { channels: sorted, time: Date.now() };
   console.log('[iptv] 频道更新: ' + sorted.length + ' 个 (CCTV' + cctv.length + ' 卫视' + weishi.length + ' 其他' + others.length + ')');
+  // 异步验证频道可用性（不阻塞）
+  validateIPTVChannels(sorted).catch(e => console.log('[iptv] 验证出错:', e.message));
+}
+
+// HEAD请求并发验证频道，每批20个
+async function validateIPTVChannels(channels) {
+  const working = [];
+  const test = async (ch) => {
+    try {
+      await axios({ method: 'head', url: ch.url, timeout: 3000,
+        headers: { 'User-Agent': config.userAgent },
+        validateStatus: s => [200, 206, 301, 302].includes(s) });
+      working.push(ch);
+    } catch (e) { /* dead */ }
+  };
+  // 分批并发，每批20个
+  for (let i = 0; i < channels.length; i += 20) {
+    await Promise.all(channels.slice(i, i + 20).map(test));
+  }
+  if (working.length > 0) {
+    fs.writeFileSync('/tmp/iptv_working.json', JSON.stringify({ channels: working }));
+  }
+  console.log('[iptv] 验证完成: ' + working.length + '/' + channels.length + ' 可用');
 }
 
 app.get('/api/live', async (req, res) => {
   try {
+    // 优先使用验证过的频道列表
     if (Date.now() - iptvCache.time > IPTV_TTL) {
       await refreshIPTV();
     }
-    res.json({ channels: iptvCache.channels, updated: iptvCache.time });
+    // 尝试读取已验证的有效频道列表
+    let channels = iptvCache.channels;
+    try {
+      const working = JSON.parse(fs.readFileSync('/tmp/iptv_working.json', 'utf8'));
+      if (working.channels && working.channels.length > 0) {
+        channels = working.channels;
+      }
+    } catch (e) {
+      // 文件不存在就用原始列表
+    }
+    res.json({ channels, updated: iptvCache.time });
   } catch (e) {
     res.json({ channels: [], error: e.message });
   }
