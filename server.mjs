@@ -221,6 +221,60 @@ app.get('/proxy/:encodedUrl', async (req, res) => {
   }
 });
 
+// 直播流代理 — 解决 iOS/HTTPS 页面无法播放 HTTP IPTV 流的混合内容问题
+// 自动重写 m3u8 内相对路径为绝对路径，支持 TS 段转发
+app.use('/play', async (req, res) => {
+  if (req.method !== 'GET') return res.status(405).end();
+  if (!validateProxyAuth(req)) return res.status(401).json({ error: '未授权' });
+
+  try {
+    // 解码目标URL（去掉 /play/ 前缀）
+    const encodedUrl = req.path.substring(1); // app.use('/play') → req.path=/encodedUrl
+    if (!encodedUrl || encodedUrl === '/') return res.status(400).send('Missing URL');
+    const targetUrl = decodeURIComponent(encodedUrl);
+    if (!isValidUrl(targetUrl)) return res.status(400).send('Invalid URL');
+
+    const response = await axios({
+      method: 'get', url: targetUrl, timeout: 8000,
+      responseType: 'arraybuffer',
+      headers: { 'User-Agent': config.userAgent }
+    });
+
+    const contentType = response.headers['content-type'] || '';
+    const isM3u8 = contentType.includes('m3u8') || contentType.includes('vnd.apple') ||
+                   targetUrl.endsWith('.m3u8');
+
+    if (isM3u8) {
+      // 重写 m3u8：相对路径 → 绝对路径 → 经代理
+      const basePath = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+      let playlist = Buffer.from(response.data).toString('utf8');
+      const lines = playlist.split('\n');
+      const rewritten = lines.map(line => {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('http')) {
+          // 相对路径 → 绝对URL → 代理
+          const absUrl = basePath + trimmed;
+          return '/play/' + encodeURIComponent(absUrl);
+        }
+        return line;
+      });
+      res.set({ 'Content-Type': 'application/vnd.apple.mpegurl', 'Access-Control-Allow-Origin': '*' });
+      return res.send(rewritten.join('\n'));
+    }
+
+    // TS 段或其他二进制流 → 直接转发
+    res.set({
+      'Content-Type': contentType || 'video/mp2t',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=10'
+    });
+    res.send(Buffer.from(response.data));
+  } catch (e) {
+    console.error('[play] 代理失败:', e.message);
+    res.status(502).end();
+  }
+});
+
 // 图片代理端点 — 解决封面图防盗链（hotlink protection）黑屏问题
 // 第三方图片CDN检测Referer非自家域名时返回空白/黑图
 // 通过服务器转发并设置同源Referer，绕过防盗链

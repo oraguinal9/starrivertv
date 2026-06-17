@@ -147,24 +147,26 @@ function playChannel(index, tab) {
     if (hls) { hls.destroy(); hls = null; }
 
     const url = ch.url;
+    // HTTP 流通过服务器代理（解决 HTTPS 页面混合内容问题）
+    const playUrl = url.startsWith('http://') ? '/play/' + encodeURIComponent(url) : url;
     if (url.endsWith('.m3u8') && Hls.isSupported()) {
         // HLS 播放
         hls = new Hls({ enableWorker: true, lowLatencyMode: false });
-        hls.loadSource(url);
+        hls.loadSource(playUrl);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
         hls.on(Hls.Events.ERROR, (event, data) => {
             if (data.fatal) {
-                console.warn('HLS错误, 尝试直连:', data.type);
+                console.warn('HLS error:', data.type);
                 hls.destroy();
                 hls = null;
-                video.src = url;
+                video.src = playUrl;
                 video.play().catch(() => {});
             }
         });
     } else {
         // 直连播放
-        video.src = url;
+        video.src = playUrl;
         video.play().catch(() => {});
     }
     video.scrollIntoView({ behavior: 'smooth' });
