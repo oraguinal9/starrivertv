@@ -83,10 +83,85 @@ app.get(['/', '/index.html', '/player.html'], async (req, res) => {
   }
 });
 
+// SSR 搜索源（用于服务端预渲染搜索结果）
+const SSR_SOURCES = [
+  { key: "bfzy",   url: "https://bfzyapi.com/api.php/provide/vod", name: "暴风资源" },
+  { key: "ruyi",   url: "https://cj.rycjapi.com/api.php/provide/vod", name: "如意资源" },
+  { key: "tyyszy", url: "https://tyyszy.com/api.php/provide/vod", name: "天涯资源" },
+  { key: "ffzy",   url: "https://api.ffzyapi.com/api.php/provide/vod", name: "非凡影视" },
+  { key: "zuid",   url: "https://api.zuidapi.com/api.php/provide/vod", name: "最大资源" },
+  { key: "wujin",  url: "https://api.wujinapi.me/api.php/provide/vod", name: "无尽资源" },
+];
+
+async function fetchSSRResults(keyword) {
+  const all = [];
+  for (const src of SSR_SOURCES) {
+    try {
+      const url = src.url + '?ac=videolist&wd=' + encodeURIComponent(keyword);
+      const resp = await axios({ method: 'get', url, timeout: 6000,
+        headers: { 'User-Agent': config.userAgent } });
+      if (resp.data && Array.isArray(resp.data.list)) {
+        for (const item of resp.data.list) {
+          all.push({
+            title: item.vod_name || '', pic: item.vod_pic || '',
+            year: item.vod_year || '', type: item.type_name || '',
+            remarks: item.vod_remarks || '', source: src.name,
+            vod_id: item.vod_id || '', source_code: src.key
+          });
+        }
+      }
+    } catch (e) { /* source dead */ }
+  }
+  // 去重
+  const seen = new Set();
+  return all.filter(r => {
+    const key = r.source_code + '_' + r.vod_id;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 36);
+}
+
+function escapeHTML(str) {
+  return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 app.get('/s=:keyword', async (req, res) => {
   try {
+    const keyword = decodeURIComponent(req.params.keyword);
     const filePath = path.join(__dirname, 'index.html');
-    const content = await renderPage(filePath, config.password);
+    let content = await renderPage(filePath, config.password);
+
+    // 抓取搜索结果并预渲染到 HTML
+    let ssrHTML = '';
+    let ssrJSON = '[]';
+    try {
+      const results = await fetchSSRResults(keyword);
+      if (results.length > 0) {
+        // 搜索引擎可读的HTML
+        let cards = '';
+        for (const r of results) {
+          const pic = r.pic && r.pic.startsWith('http') ? '<img src="' + escapeHTML(r.pic) + '" alt="' + escapeHTML(r.title) + '" style="width:100%;aspect-ratio:2/3;object-fit:cover;border-radius:8px;margin-bottom:8px" referrerpolicy="no-referrer" loading="lazy">' : '';
+          cards += '<div style="background:#111;border:1px solid #222;border-radius:12px;padding:12px;width:calc(33.3% - 8px);min-width:200px">' +
+            pic +
+            '<div style="color:#f59e0b;font-size:14px;font-weight:600;margin-bottom:4px">' + escapeHTML(r.title) + '</div>' +
+            (r.year ? '<span style="color:#666;font-size:12px">' + escapeHTML(r.year) + '</span> ' : '') +
+            (r.type ? '<span style="color:#666;font-size:12px">' + escapeHTML(r.type) + '</span>' : '') +
+            '<div style="color:#888;font-size:11px;margin-top:4px">来源: ' + escapeHTML(r.source) + '</div>' +
+            '</div>';
+        }
+        ssrHTML = '<div class="ssr-results" style="max-width:900px;margin:0 auto;padding:20px"><h2 style="color:#e4e4e7;margin-bottom:16px;font-size:20px">搜索「' + escapeHTML(keyword) + '」</h2><div style="display:flex;flex-wrap:wrap;gap:12px">' + cards + '</div></div>';
+        ssrJSON = JSON.stringify(results);
+      }
+    } catch (e) {
+      console.error('SSR搜索失败:', e.message);
+    }
+
+    // 注入SSR结果 — 放在搜索区域上方，搜索引擎可见
+    content = content.replace('</head>', '<script>window.__SSR_RESULTS__ = ' + ssrJSON + ';</script></head>');
+    // 插入SSR内容到页面 body 顶部
+    const bodyTag = '<body class="page-bg text-white">';
+    content = content.replace(bodyTag, bodyTag + '\n' + ssrHTML);
     res.send(content);
   } catch (error) {
     console.error('搜索页面渲染错误:', error);
