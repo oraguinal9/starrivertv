@@ -16,7 +16,7 @@ const config = {
   port: process.env.PORT || 8080,
   password: process.env.PASSWORD || '',
   corsOrigin: process.env.CORS_ORIGIN || '*',
-  timeout: parseInt(process.env.REQUEST_TIMEOUT || '5000'),
+  timeout: parseInt(process.env.REQUEST_TIMEOUT || '10000'),
   maxRetries: parseInt(process.env.MAX_RETRIES || '2'),
   cacheMaxAge: process.env.CACHE_MAX_AGE || '1d',
   userAgent: process.env.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -85,12 +85,12 @@ app.get(['/', '/index.html', '/player.html'], async (req, res) => {
 
 // SSR 搜索源（用于服务端预渲染搜索结果）
 const SSR_SOURCES = [
-  { key: "bfzy",   url: "https://bfzyapi.com/api.php/provide/vod", name: "暴风资源" },
   { key: "ruyi",   url: "https://cj.rycjapi.com/api.php/provide/vod", name: "如意资源" },
-  { key: "tyyszy", url: "https://tyyszy.com/api.php/provide/vod", name: "天涯资源" },
   { key: "ffzy",   url: "https://api.ffzyapi.com/api.php/provide/vod", name: "非凡影视" },
+  { key: "bfzy",   url: "https://bfzyapi.com/api.php/provide/vod", name: "暴风资源" },
   { key: "zuid",   url: "https://api.zuidapi.com/api.php/provide/vod", name: "最大资源" },
   { key: "wujin",  url: "https://api.wujinapi.me/api.php/provide/vod", name: "无尽资源" },
+  { key: "jszy",   url: "https://jszyapi.com/api.php/provide/vod", name: "极速资源" },
 ];
 
 async function fetchSSRResults(keyword) {
@@ -98,7 +98,7 @@ async function fetchSSRResults(keyword) {
   for (const src of SSR_SOURCES) {
     try {
       const url = src.url + '?ac=videolist&wd=' + encodeURIComponent(keyword);
-      const resp = await axios({ method: 'get', url, timeout: 6000,
+      const resp = await axios({ method: 'get', url, timeout: 10000,
         headers: { 'User-Agent': config.userAgent } });
       if (resp.data && Array.isArray(resp.data.list)) {
         for (const item of resp.data.list) {
@@ -226,7 +226,9 @@ function validateProxyAuth(req) {
   return true;
 }
 
-app.get('/proxy/:encodedUrl', async (req, res) => {
+app.use('/proxy', async (req, res) => {
+  if (req.method !== 'GET') return res.status(405).end();
+
   try {
     // 验证鉴权
     if (!validateProxyAuth(req)) {
@@ -236,7 +238,8 @@ app.get('/proxy/:encodedUrl', async (req, res) => {
       });
     }
 
-    const encodedUrl = req.params.encodedUrl;
+    // 使用 originalUrl 提取完整编码URL（避免 Express param 截断 %2F）
+    const encodedUrl = req.originalUrl.replace('/proxy/', '');
     const targetUrl = decodeURIComponent(encodedUrl);
 
     // 安全验证
@@ -310,7 +313,7 @@ app.use('/play', async (req, res) => {
     if (!isValidUrl(targetUrl)) return res.status(400).send('Invalid URL');
 
     const response = await axios({
-      method: 'get', url: targetUrl, timeout: 8000,
+      method: 'get', url: targetUrl, timeout: 20000,
       responseType: 'arraybuffer',
       headers: { 'User-Agent': config.userAgent }
     });
@@ -392,7 +395,7 @@ app.use('/img', async (req, res) => {
       method: 'get',
       url: targetUrl,
       responseType: 'arraybuffer',
-      timeout: 8000,
+      timeout: 20000,
       headers: {
         'User-Agent': config.userAgent,
         'Referer': new URL(targetUrl).origin
@@ -469,7 +472,7 @@ app.get('/sitemap.xml', async (req, res) => {
     try {
       const fetchHot = async (type, tag) => {
         const url = `https://movie.douban.com/j/search_subjects?type=${type}&tag=${encodeURIComponent(tag)}&sort=recommend&page_limit=30`;
-        const resp = await axios({ method: 'get', url, timeout: 8000,
+        const resp = await axios({ method: 'get', url, timeout: 20000,
           headers: { 'User-Agent': config.userAgent } });
         return (resp.data.subjects || []).map(s => s.title).filter(Boolean);
       };

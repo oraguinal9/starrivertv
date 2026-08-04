@@ -509,13 +509,29 @@ function initPlayer(videoUrl) {
                     }
                 });
 
-                // 通过代理加载 m3u8，避免 CORS
-                let proxiedUrl = PROXY_URL + encodeURIComponent(url);
-                if (window.ProxyAuth && window.ProxyAuth.addAuthToProxyUrl) {
-                    proxiedUrl = await window.ProxyAuth.addAuthToProxyUrl(proxiedUrl);
-                }
-                hls.loadSource(proxiedUrl);
-                hls.attachMedia(video);
+                // 智能加载：直连优先，hls网络错误时自动切代理
+                let useProxy = false;
+                let retried = false;
+                const loadUrl = (targetUrl) => {
+                    hls.loadSource(targetUrl);
+                    hls.attachMedia(video);
+                };
+                const retryWithProxy = () => {
+                    if (retried) return;
+                    retried = true;
+                    hls.stopLoad();
+                    hls.detachMedia();
+                    const proxiedUrl = PLAY_PROXY_URL + encodeURIComponent(url);
+                    console.log('🔄 直连失败，自动切换代理:', url.substring(0,60));
+                    loadUrl(proxiedUrl);
+                };
+                // hls.js 网络错误立即切代理
+                hls.on(Hls.Events.ERROR, (event, data) => {
+                    if (data.fatal && (data.type === Hls.ErrorTypes.NETWORK_ERROR || data.type === Hls.ErrorTypes.MEDIA_ERROR)) {
+                        retryWithProxy();
+                    }
+                });
+                loadUrl(url);
 
                 // enable airplay, from https://github.com/video-dev/hls.js/issues/5989
                 // 检查是否已存在source元素，如果存在则更新，不存在则创建
@@ -770,7 +786,7 @@ class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
         const load = this.load.bind(this);
         this.load = function (context, config, callbacks) {
             // 为代理 URL 添加鉴权参数（包括音视频分片）
-            if (context.url && context.url.startsWith('/proxy/')) {
+            if (context.url && (context.url.startsWith('/proxy/') || context.url.startsWith('/play/'))) {
                 const hash = localStorage.getItem('proxyAuthHash');
                 if (hash && !context.url.includes('auth=')) {
                     const sep = context.url.includes('?') ? '&' : '?';

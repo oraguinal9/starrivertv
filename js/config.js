@@ -1,5 +1,6 @@
 // 全局常量配置
-const PROXY_URL = '/proxy/';    // 适用于 Cloudflare, Netlify (带重写), Vercel (带重写)
+const PROXY_URL = '/proxy/';       // API 代理（搜索/详情等）
+const PLAY_PROXY_URL = '/play/';   // 视频流代理（支持 m3u8 重写 + 长编码URL）
 // const HOPLAYER_URL = 'https://hoplayer.com/index.html';
 const SEARCH_HISTORY_KEY = 'videoSearchHistory';
 const MAX_HISTORY_ITEMS = 5;

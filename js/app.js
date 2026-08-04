@@ -1,5 +1,28 @@
+// localStorage 自动迁移：旧键名映射到新键名
+const API_KEY_MIGRATION = { tyyszy: 'tyys', jisu: 'jszy', lizi: null, heimuer: null, ikun: null };
+
+function migrateStoredAPIs() {
+  let stored = localStorage.getItem('selectedAPIs');
+  if (!stored) return;
+  try {
+    let keys = JSON.parse(stored);
+    let changed = false;
+    keys = keys.map(k => {
+      if (k in API_KEY_MIGRATION) { changed = true; return API_KEY_MIGRATION[k]; }
+      return k;
+    }).filter(Boolean); // remove nulls (deleted sources)
+    // Remove duplicates
+    keys = [...new Set(keys)];
+    if (changed) {
+      localStorage.setItem('selectedAPIs', JSON.stringify(keys));
+      console.log('🔧 已自动更新视频源列表 (' + stored + ' → ' + JSON.stringify(keys) + ')');
+    }
+  } catch(e) {}
+}
+migrateStoredAPIs();
+
 // 全局变量
-let selectedAPIs = JSON.parse(localStorage.getItem('selectedAPIs') || '["tyyszy","dyttzy", "bfzy", "ruyi"]'); // 默认选中资源
+let selectedAPIs = JSON.parse(localStorage.getItem('selectedAPIs') || '["ruyi","ffzy","dyttzy","mdzy","bfzy","zuid","yinghua","wolong","jszy","wujin","ckzy","hhzy","tyys","qiqi","sanliuling"]'); // 默认全选15源
 let customAPIs = JSON.parse(localStorage.getItem('customAPIs') || '[]'); // 存储自定义API列表
 
 // 添加当前播放的集数索引
@@ -72,7 +95,7 @@ function initAPICheckboxes() {
     normaldiv.className = 'grid grid-cols-2 gap-2';
     const normalTitle = document.createElement('div');
     normalTitle.className = 'api-group-title';
-    normalTitle.textContent = '普通资源';
+    normalTitle.innerHTML = '普通资源 <button onclick="toggleAllSources()" style="font-size:10px;background:#333;color:#ccc;border:1px solid #555;padding:2px 8px;border-radius:4px;cursor:pointer;margin-left:8px">全选/取消</button>';
     normaldiv.appendChild(normalTitle);
 
     // 创建普通API源的复选框
@@ -330,6 +353,21 @@ function restoreAddCustomApiButtons() {
         <button onclick="cancelAddCustomApi()" class="bg-[#444] hover:bg-[#555] text-white px-3 py-1 rounded text-xs">取消</button>
     `;
 }
+
+// 全选/取消全选
+window.toggleAllSources = function() {
+  const allKeys = Object.keys(API_SITES).filter(k => !API_SITES[k].adult);
+  const allChecked = allKeys.every(k => selectedAPIs.includes(k));
+  if (allChecked) {
+    selectedAPIs = [];
+  } else {
+    selectedAPIs = [...allKeys];
+  }
+  localStorage.setItem('selectedAPIs', JSON.stringify(selectedAPIs));
+  renderAPICheckboxes();
+  const countEl = document.getElementById('selectedCount');
+  if (countEl) countEl.textContent = selectedAPIs.length;
+};
 
 // 更新选中的API列表
 function updateSelectedAPIs() {
