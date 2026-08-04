@@ -45,7 +45,11 @@
     <div id="player-container" class="mb-6 hidden">
         <div class="flex items-center justify-between p-3 bg-[#111] border-b border-gray-800">
             <span id="current-channel-name" class="font-medium"></span>
-            <button onclick="closePlayer()" class="text-gray-400 hover:text-white px-3 py-1 rounded-lg hover:bg-[#333] transition-colors">✕ 关闭</button>
+            <span id="player-status" class="text-xs text-gray-500"></span>
+            <div class="flex items-center gap-2">
+                <button onclick="switchLine()" class="text-gray-400 hover:text-white px-3 py-1 rounded-lg hover:bg-[#333] transition-colors text-sm">🔄 换线路</button>
+                <button onclick="closePlayer()" class="text-gray-400 hover:text-white px-3 py-1 rounded-lg hover:bg-[#333] transition-colors">✕ 关闭</button>
+            </div>
         </div>
         <video id="player" controls autoplay class="w-full aspect-video" style="max-height:60vh;"></video>
     </div>
@@ -85,6 +89,7 @@ let allChannels = [];
 let currentTab = 'all';
 let searchText = '';
 let currentChannel = null;
+let currentLine = 0;
 
 // HLS.js 实例
 let hls = null;
@@ -211,52 +216,107 @@ async function playChannel(index) {
     if (!ch) return;
 
     currentChannel = ch;
-    document.getElementById('current-channel-name').textContent = '📺 ' + ch.name;
+    currentLine = 0;
     document.getElementById('player-container').classList.remove('hidden');
+    await startPlay();
+    video.scrollIntoView({ behavior: 'smooth' });
+    renderChannels();
+}
 
+// 当前频道的全部线路
+function getChannelUrls(ch) {
+    const urls = (ch.urls && ch.urls.length ? ch.urls : [ch.url]).filter(Boolean);
+    return urls.length ? urls : [ch.url];
+}
+
+function setPlayerStatus(text) {
+    const el = document.getElementById('player-status');
+    if (el) el.textContent = text || '';
+}
+
+// 播放当前线路；失败时自动切换下一条
+async function startPlay() {
+    if (!currentChannel) return;
     const video = document.getElementById('player');
+    const urls = getChannelUrls(currentChannel);
+    if (currentLine >= urls.length) {
+        setPlayerStatus('⚠️ 所有线路暂不可用');
+        return;
+    }
+    const url = urls[currentLine];
+    const lineInfo = '线路 ' + (currentLine + 1) + '/' + urls.length;
+    document.getElementById('current-channel-name').textContent = '📺 ' + currentChannel.name;
+    setPlayerStatus(lineInfo + ' 加载中...');
 
-    // 销毁旧 HLS 实例
+    // 销毁旧 HLS 实例，清理旧错误处理
     if (hls) { hls.destroy(); hls = null; }
+    video.onerror = null;
+    video.removeAttribute('src');
+    video.load();
 
-    const url = ch.url;
     // HTTP 流通过服务器代理（解决 HTTPS 页面混合内容问题）
     let playUrl = url.startsWith('http://') ? '/play/' + encodeURIComponent(url) : url;
     // 代理流需要带鉴权参数（站点设置了 PASSWORD 时避免 401）
     if (playUrl.startsWith('/play/') && window.ProxyAuth && window.ProxyAuth.addAuthToProxyUrl) {
         playUrl = await window.ProxyAuth.addAuthToProxyUrl(playUrl);
     }
+
+    let switching = false;
+    const tryNextLine = () => {
+        if (switching) return;
+        switching = true;
+        if (hls) { hls.destroy(); hls = null; }
+        video.onerror = null;
+        if (currentLine + 1 < urls.length) {
+            currentLine++;
+            startPlay();
+        } else {
+            setPlayerStatus('⚠️ 该频道所有线路暂不可用');
+        }
+    };
+
     if (url.endsWith('.m3u8') && Hls.isSupported()) {
         // HLS 播放
         hls = new Hls({ enableWorker: true, lowLatencyMode: false });
         hls.loadSource(playUrl);
         hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            setPlayerStatus(lineInfo);
+            video.play().catch(() => {});
+        });
         hls.on(Hls.Events.ERROR, (event, data) => {
             if (data.fatal) {
-                console.warn('HLS error:', data.type);
-                hls.destroy();
-                hls = null;
-                video.src = playUrl;
-                video.play().catch(() => {});
+                console.warn('HLS error:', data.type, data.details);
+                tryNextLine();
             }
         });
     } else {
         // 直连播放
+        video.onerror = () => { video.onerror = null; tryNextLine(); };
         video.src = playUrl;
+        setPlayerStatus(lineInfo);
         video.play().catch(() => {});
     }
-    video.scrollIntoView({ behavior: 'smooth' });
-    renderChannels();
+}
+
+// 手动切换线路（或单线路时重新加载）
+function switchLine() {
+    if (!currentChannel) return;
+    const urls = getChannelUrls(currentChannel);
+    currentLine = urls.length > 1 ? (currentLine + 1) % urls.length : 0;
+    startPlay();
 }
 
 function closePlayer() {
     const video = document.getElementById('player');
     if (hls) { hls.destroy(); hls = null; }
+    video.onerror = null;
     video.pause();
     video.removeAttribute('src');
     video.load();
     currentChannel = null;
+    currentLine = 0;
+    setPlayerStatus('');
     document.getElementById('player-container').classList.add('hidden');
     renderChannels();
 }

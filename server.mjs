@@ -519,11 +519,13 @@ let iptvValidated = { channels: [], validatedAt: 0 };   // 验证结果内存缓
 const IPTV_TTL = 24 * 60 * 60 * 1000;                   // 原始列表缓存24小时
 const VALIDATED_TTL = 6 * 60 * 60 * 1000;               // 验证结果复用6小时
 const WORKING_FILE = '/tmp/iptv_working.json';
+const CACHE_VERSION = 5;                                // 验证缓存格式版本，升级后旧缓存作废重新验证
 // 按优先级排列：IPv4 稳定源优先，IPv6 源兜底（国内宽带大多无 IPv6）
 const IPTV_SOURCES = [
-  { key: 'wwb521',  url: 'https://raw.githubusercontent.com/wwb521/live/main/tv.m3u',               priority: 1 },
-  { key: 'iptvorg', url: 'https://raw.githubusercontent.com/iptv-org/iptv/master/streams/cn.m3u',  priority: 2 },
-  { key: 'fanming', url: 'https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u', priority: 3 },
+  { key: 'wwb521',  url: 'https://raw.githubusercontent.com/wwb521/live/main/tv.m3u',                priority: 1 },
+  { key: 'iptvorg', url: 'https://iptv-org.github.io/iptv/countries/cn.m3u',                        priority: 2 }, // 官方公开地址，精选带台标
+  { key: 'iptvorg', url: 'https://raw.githubusercontent.com/iptv-org/iptv/master/streams/cn.m3u',   priority: 3 }, // raw 补充覆盖
+  { key: 'fanming', url: 'https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u', priority: 4 },
 ];
 
 // 解析 m3u 列表，提取频道信息
@@ -574,14 +576,34 @@ function categorizeChannel(name, group) {
 
 // 频道名规范化，用于跨源去重（去掉清晰度、频道后缀等干扰词）
 function normalizeChannelKey(name) {
-  return (name || '')
-    .toLowerCase()
+  let s = (name || '').toLowerCase();
+  // CCTV 频道按编号归并：CCTV-2财经 / CCTV2 / CCTV-2 都归为 cctv2；保留 + 号区分 CCTV-5+；4K/8K 除外
+  if (!/^cctv[-\s]*\d+k/.test(s)) {
+    s = s.replace(/^cctv[-\s]*(\d+)(\+)?[\s-]*[\u4e00-\u9fa5a-z]*$/, 'cctv$1$2');
+  }
+  s = s
     .replace(/高清|超清|标清|4k|uhd|hd|sd|1080p|720p|2160p|综合/g, '')
-    .replace(/[^a-z0-9\u4e00-\u9fa5]/g, '')
-    .trim();
+    .replace(/[^a-z0-9\u4e00-\u9fa5+]/g, '');
+  return s.trim();
 }
 
-// 按源优先级合并去重；同源内保留高清优先
+// 抓取单个源，失败自动重试一次
+async function fetchSource(s) {
+  let lastErr;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const r = await axios({ method: 'get', url: s.url, timeout: 20000,
+        headers: { 'User-Agent': config.userAgent } });
+      return { key: s.key, text: r.data };
+    } catch (e) {
+      lastErr = e;
+      if (attempt === 1) console.log(`[iptv] 源 ${s.key} 第${attempt}次失败，重试中...`);
+    }
+  }
+  throw lastErr;
+}
+
+// 按源优先级合并去重；同一频道保留多条备用线路（urls）
 function mergeChannels(lists) {
   const byKey = new Map();
   for (const { channels } of lists) {
@@ -589,9 +611,29 @@ function mergeChannels(lists) {
       const key = normalizeChannelKey(ch.name);
       if (!key) continue;
       const existing = byKey.get(key);
-      if (!existing) byKey.set(key, ch);
-      else if (existing.source === ch.source && !existing.hd && ch.hd) byKey.set(key, ch);
+      if (!existing) {
+        ch.urls = [ch.url];
+        byKey.set(key, ch);
+      } else {
+        if (existing.source === ch.source && !existing.hd && ch.hd) {
+          // 同源高清优先：把高清条目信息并入并让高清地址排前
+          existing.name = ch.name;
+          existing.logo = ch.logo || existing.logo;
+          existing.group = ch.group || existing.group;
+          existing.hd = true;
+          existing.urls = existing.urls.filter(u => u !== ch.url);
+          existing.urls.unshift(ch.url);
+          existing.url = ch.url;
+        } else {
+          // 追加备用线路
+          if (!existing.urls.includes(ch.url)) existing.urls.push(ch.url);
+        }
+      }
     }
+  }
+  for (const ch of byKey.values()) {
+    ch.urls = [...new Set(ch.urls)];
+    ch.url = ch.urls[0];
   }
   return [...byKey.values()];
 }
@@ -603,20 +645,27 @@ async function refreshIPTV() {
   try {
     // 并行抓取所有源
     const results = await Promise.allSettled(IPTV_SOURCES.map(s =>
-      axios({ method: 'get', url: s.url, timeout: 20000, headers: { 'User-Agent': config.userAgent } })
-        .then(r => ({ key: s.key, text: r.data }))
+      fetchSource(s)
     ));
     const lists = [];
+    let okCount = 0;
     IPTV_SOURCES.forEach((s, i) => {
       const r = results[i];
       if (r.status === 'fulfilled') {
         const parsed = parseM3U(r.value.text, r.value.key);
         lists.push({ priority: s.priority, channels: parsed });
+        okCount++;
         console.log(`[iptv] 源 ${s.key} 解析: ${parsed.length} 个频道`);
       } else {
         console.log(`[iptv] 源 ${s.key} 获取失败: ${r.reason?.message || r.reason}`);
       }
     });
+    // 源大量失败时保留上次缓存，避免用残缺数据覆盖好列表
+    if (okCount < 2 && iptvCache.channels.length > 0) {
+      iptvCache.status = 'degraded';
+      console.warn(`[iptv] 仅 ${okCount}/${IPTV_SOURCES.length} 个源可用，保留上次缓存 (${iptvCache.channels.length} 个频道)`);
+      return;
+    }
     lists.sort((a, b) => a.priority - b.priority);
     const merged = mergeChannels(lists);
     // 分类排序：央视 > 卫视 > 地方 > 数字 > 其他
@@ -636,37 +685,53 @@ async function refreshIPTV() {
   }
 }
 
-// 并发验证频道：HEAD 优先，失败后用 GET(Range) 兜底（部分服务器拒绝 HEAD 但可播放）
+// 单条线路探测：HEAD 优先，失败后用 GET(Range) 兜底；HTML 错误页视为不可用
+async function probeUrl(u) {
+  try {
+    const r = await axios({ method: 'head', url: u, timeout: 4000,
+      headers: { 'User-Agent': config.userAgent },
+      validateStatus: s => [200, 206, 301, 302, 403].includes(s) });
+    const ct = (r.headers['content-type'] || '').toLowerCase();
+    if (ct.includes('text/html')) return false;
+    return true;
+  } catch (e) { /* fallthrough to GET */ }
+  try {
+    const r = await axios({ method: 'get', url: u, timeout: 3000,
+      responseType: 'arraybuffer', maxContentLength: 65536,
+      headers: { 'User-Agent': config.userAgent, Range: 'bytes=0-0' },
+      validateStatus: s => [200, 206, 301, 302, 403].includes(s) });
+    const ct = (r.headers['content-type'] || '').toLowerCase();
+    if (ct.includes('text/html')) return false;
+    return true;
+  } catch (e) { /* dead */ }
+  return false;
+}
+
+// 并发验证频道：逐个探测频道线路，任一线路可用即保留并把可用线路排前
 async function validateIPTVChannels(channels) {
   // 验证结果 6 小时内有效，跳过重复验证
   if (iptvValidated.channels.length && Date.now() - iptvValidated.validatedAt < VALIDATED_TTL) return;
   const working = [];
-  let headOk = 0, getOk = 0;
+  let firstOk = 0, fallbackOk = 0;
   const test = async (ch) => {
-    try {
-      await axios({ method: 'head', url: ch.url, timeout: 4000,
-        headers: { 'User-Agent': config.userAgent },
-        validateStatus: s => [200, 206, 301, 302, 403].includes(s) });
+    const urls = (ch.urls && ch.urls.length ? ch.urls : [ch.url]).filter(Boolean);
+    for (let k = 0; k < urls.length; k++) {
+      if (!(await probeUrl(urls[k]))) continue;
+      // 该线路可用：排到首位，其余保留为备用（页面播放失败时自动切换）
+      const rest = urls.filter(u => u !== urls[k]);
+      ch.urls = [urls[k], ...rest];
+      ch.url = urls[k];
+      if (k === 0) firstOk++; else fallbackOk++;
       working.push(ch);
-      headOk++;
-    } catch (e) {
-      // HEAD 失败时用 GET 探测：带 Range 只取首段，限流限大小
-      try {
-        await axios({ method: 'get', url: ch.url, timeout: 3000,
-          responseType: 'arraybuffer', maxContentLength: 65536,
-          headers: { 'User-Agent': config.userAgent, Range: 'bytes=0-0' },
-          validateStatus: s => [200, 206, 301, 302, 403].includes(s) });
-        working.push(ch);
-        getOk++;
-      } catch (e2) { /* dead */ }
+      return;
     }
   };
   for (let i = 0; i < channels.length; i += 25) {
     await Promise.all(channels.slice(i, i + 25).map(test));
   }
-  console.log(`[iptv] 验证完成: ${working.length}/${channels.length} 可用 (HEAD ${headOk} + GET ${getOk})`);
+  console.log(`[iptv] 验证完成: ${working.length}/${channels.length} 可用 (首选${firstOk} 备用${fallbackOk})`);
   if (working.length > 0) {
-    iptvValidated = { channels: working, validatedAt: Date.now() };
+    iptvValidated = { version: CACHE_VERSION, channels: working, validatedAt: Date.now() };
     try {
       fs.writeFileSync(WORKING_FILE, JSON.stringify(iptvValidated));
     } catch (e) { console.log('[iptv] 写入验证缓存失败:', e.message); }
@@ -696,9 +761,16 @@ app.get('/api/live', async (req, res) => {
 // 启动时读取上次验证结果（避免重启后重新验证全部频道）
 try {
   const saved = JSON.parse(fs.readFileSync(WORKING_FILE, 'utf8'));
-  if (saved.channels && saved.channels.length > 0) {
-    iptvValidated = { channels: saved.channels, validatedAt: saved.validatedAt || 0 };
+  if (saved.version === CACHE_VERSION && saved.channels && saved.channels.length > 0) {
+    // 兼容旧缓存：补齐 urls 字段
+    const channels = saved.channels.map(c => {
+      if (!Array.isArray(c.urls)) c.urls = c.url ? [c.url] : [];
+      return c;
+    });
+    iptvValidated = { version: CACHE_VERSION, channels, validatedAt: saved.validatedAt || 0 };
     console.log(`[iptv] 已加载上次验证结果: ${saved.channels.length} 个可用频道`);
+  } else {
+    console.log('[iptv] 验证缓存版本过旧或为空，启动后将重新验证');
   }
 } catch (e) { /* 无缓存文件 */ }
 
