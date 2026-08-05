@@ -79,7 +79,7 @@
     <div id="empty" class="text-center py-20 hidden">
         <div class="text-5xl mb-4">📡</div>
         <div class="text-gray-400">暂无频道数据</div>
-        <button onclick="loadChannels()" class="mt-4 px-4 py-2 bg-[#222] hover:bg-[#333] text-gray-300 rounded-lg transition-colors">重新加载</button>
+        <button onclick="loadChannels(true)" class="mt-4 px-4 py-2 bg-[#222] hover:bg-[#333] text-gray-300 rounded-lg transition-colors">重新加载</button>
     </div>
 
 </div>
@@ -90,6 +90,8 @@ let currentTab = 'all';
 let searchText = '';
 let currentChannel = null;
 let currentLine = 0;
+let loadAttempts = 0;
+const MAX_LOAD_ATTEMPTS = 8;
 
 // HLS.js 实例
 let hls = null;
@@ -119,7 +121,8 @@ function getFiltered() {
     return list;
 }
 
-async function loadChannels() {
+async function loadChannels(manual) {
+    if (manual) loadAttempts = 0;
     const loading = document.getElementById('loading');
     const grid = document.getElementById('channel-grid');
     const status = document.getElementById('loading-status');
@@ -130,20 +133,28 @@ async function loadChannels() {
 
     try {
         const resp = await fetch('/api/live');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
         allChannels = data.channels || [];
+        loadAttempts = allChannels.length > 0 ? 0 : loadAttempts + 1;
         updateStats(data);
         renderTabs();
         renderChannels();
-        // 后台仍在抓取且列表为空时，稍后自动重试
-        if (allChannels.length === 0 && (!data.status || data.status === 'loading')) {
-            status.textContent = '正在抓取频道，稍候自动重试...';
+        // 频道尚未抓取/验证完成或列表为空时，自动重试
+        if (allChannels.length === 0 && loadAttempts < MAX_LOAD_ATTEMPTS) {
+            status.textContent = '正在抓取频道，稍候自动重试 (' + loadAttempts + '/' + MAX_LOAD_ATTEMPTS + ')...';
             setTimeout(loadChannels, 4000);
             return;
         }
         status.textContent = '加载了 ' + allChannels.length + ' 个频道';
         setTimeout(() => { loading.style.display = 'none'; }, 300);
     } catch (e) {
+        loadAttempts++;
+        if (loadAttempts < MAX_LOAD_ATTEMPTS) {
+            status.textContent = '加载失败，稍候自动重试 (' + loadAttempts + '/' + MAX_LOAD_ATTEMPTS + ')...';
+            setTimeout(loadChannels, 4000);
+            return;
+        }
         loading.style.display = 'none';
         document.getElementById('empty').classList.remove('hidden');
         console.error('加载频道失败:', e);

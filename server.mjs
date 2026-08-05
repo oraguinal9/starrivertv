@@ -753,14 +753,19 @@ async function probeStream(u) {
     'drive.mxmy.net', 'rihou.cc', 'gmcc.net', 'chinamobile.com', 'rrs03.hw', 'ottrrs.hl', '3116598.xyz'];
   if (badCDNs.some(d => url.includes(d))) return null;
 
-  // 5. 检查首个分片地址：坏CDN / 国内运营商内网IP / IPv6-only
+  // 5. 取首个分片地址（相对路径 → 绝对）
   const lines = m3u8.split('\n');
   let firstStream = '';
   for (const line of lines) {
     const t = line.trim();
     if (t && !t.startsWith('#')) { firstStream = t; break; }
   }
-  if (firstStream && firstStream.startsWith('http')) {
+  if (firstStream) {
+    if (!/^https?:\/\//i.test(firstStream)) {
+      const base = url.substring(0, url.lastIndexOf('/') + 1);
+      firstStream = base + firstStream;
+    }
+    // 6. 坏源过滤：坏CDN / 国内运营商内网IP / IPv6-only
     if (badCDNs.some(d => firstStream.includes(d))) return null;
     const ipMatch = firstStream.match(/\/\/(\d{1,3})\./);
     if (ipMatch) {
@@ -768,9 +773,25 @@ async function probeStream(u) {
       if ([10, 61, 100, 110, 111, 112, 113, 116, 120, 123, 173, 198, 204, 218, 222].includes(b)) return null;
     }
     if (firstStream.includes('[2409:') || firstStream.includes('[2408:') || firstStream.includes('[240e:')) return null;
+
+    // 7. 探测首个分片是否真的可取（过滤清单活着但流已死的频道）
+    let segOk = false;
+    for (const attempt of [firstStream, ALI_PROXY + encodeURIComponent(firstStream)]) {
+      try {
+        const r = await axios({ method: 'get', url: attempt, timeout: 5000,
+          responseType: 'arraybuffer', maxContentLength: 65536,
+          headers: { 'User-Agent': config.userAgent, Range: 'bytes=0-1023' },
+          validateStatus: s => [200, 206].includes(s) });
+        if (r.data && r.data.length > 3 && !((r.headers['content-type'] || '').toLowerCase().includes('text/html'))) {
+          segOk = true;
+          break;
+        }
+      } catch (e) { /* 尝试下一种方式 */ }
+    }
+    if (!segOk) return null;
   }
 
-  // 6. 直连标记：https + CORS 允许
+  // 8. 直连标记：https + CORS 允许
   const isDirect = !viaRelay && url.startsWith('https://') &&
     (resp.headers['access-control-allow-origin'] || '') === '*';
   return { url, direct: isDirect };
