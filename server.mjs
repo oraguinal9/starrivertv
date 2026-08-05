@@ -533,8 +533,8 @@ ${urlEntries.join('\n')}
 let iptvCache = { channels: [], time: 0, status: 'idle' };
 let iptvRefreshing = false;
 let iptvValidated = { channels: [], validatedAt: 0 };   // 验证结果内存缓存
+let iptvValidating = false;                             // 防止重复并发验证
 const IPTV_TTL = 12 * 60 * 60 * 1000;                   // 原始列表缓存12小时
-const VALIDATED_TTL = 6 * 60 * 60 * 1000;               // 验证结果复用6小时
 const WORKING_FILE = '/tmp/iptv_working.json';
 const CACHE_VERSION = 7;                                // 验证缓存格式版本，升级后旧缓存作废重新验证
 // 按优先级排列：主力大源在前，IPv4/IPv6 互补，多源冗余
@@ -799,38 +799,46 @@ async function probeStream(u) {
 
 // 并发验证频道：逐个探测频道线路，任一线路可用即保留并把可用线路排前
 async function validateIPTVChannels(channels) {
-  // 验证结果 6 小时内有效，跳过重复验证
-  if (iptvValidated.channels.length && Date.now() - iptvValidated.validatedAt < VALIDATED_TTL) return;
-  const working = [];
-  let firstOk = 0, fallbackOk = 0;
-  const test = async (ch) => {
-    const urls = (ch.urls && ch.urls.length ? ch.urls : [ch.url]).filter(Boolean);
-    for (let k = 0; k < urls.length; k++) {
-      const result = await probeStream(urls[k]);
-      if (!result) continue;
-      // 该线路可用：排到首位，其余保留为备用（页面播放失败时自动切换）
-      const rest = urls.filter(u => u !== urls[k]);
-      ch.urls = [result.url, ...rest];
-      ch.url = result.url;
-      ch.direct = result.direct;
-      if (k === 0) firstOk++; else fallbackOk++;
-      working.push(ch);
-      return;
+  // 已有验证在跑则跳过；旧验证结果保留到新结果完成，避免页面空窗
+  if (iptvValidating) return;
+  iptvValidating = true;
+  try {
+    const working = [];
+    let firstOk = 0, fallbackOk = 0;
+    const test = async (ch) => {
+      const urls = (ch.urls && ch.urls.length ? ch.urls : [ch.url]).filter(Boolean);
+      for (let k = 0; k < urls.length; k++) {
+        const result = await probeStream(urls[k]);
+        if (!result) continue;
+        // 该线路可用：排到首位，其余保留为备用（页面播放失败时自动切换）
+        const rest = urls.filter(u => u !== urls[k]);
+        ch.urls = [result.url, ...rest];
+        ch.url = result.url;
+        ch.direct = result.direct;
+        if (k === 0) firstOk++; else fallbackOk++;
+        working.push(ch);
+        return;
+      }
+    };
+    for (let i = 0; i < channels.length; i += 30) {
+      await Promise.all(channels.slice(i, i + 30).map(test));
+      if ((i / 30) % 10 === 0) {
+        console.log(`[iptv] 验证进度: ${Math.min(i + 30, channels.length)}/${channels.length}`);
+      }
     }
-  };
-  for (let i = 0; i < channels.length; i += 30) {
-    await Promise.all(channels.slice(i, i + 30).map(test));
-  }
-  // 排序：分类 > 直连优先 > 名称
-  const order = { cctv: 0, weishi: 1, difang: 2, shuzi: 3, other: 4 };
-  working.sort((a, b) => (order[a.category] - order[b.category]) ||
-    ((a.direct !== b.direct) ? (a.direct ? -1 : 1) : a.name.localeCompare(b.name, 'zh')));
-  console.log(`[iptv] 验证完成: ${working.length}/${channels.length} 可用 (首选${firstOk} 备用${fallbackOk})`);
-  if (working.length > 0) {
-    iptvValidated = { version: CACHE_VERSION, channels: working, validatedAt: Date.now() };
-    try {
-      fs.writeFileSync(WORKING_FILE, JSON.stringify(iptvValidated));
-    } catch (e) { console.log('[iptv] 写入验证缓存失败:', e.message); }
+    // 排序：分类 > 直连优先 > 名称
+    const order = { cctv: 0, weishi: 1, difang: 2, shuzi: 3, other: 4 };
+    working.sort((a, b) => (order[a.category] - order[b.category]) ||
+      ((a.direct !== b.direct) ? (a.direct ? -1 : 1) : a.name.localeCompare(b.name, 'zh')));
+    console.log(`[iptv] 验证完成: ${working.length}/${channels.length} 可用 (首选${firstOk} 备用${fallbackOk})`);
+    if (working.length > 0) {
+      iptvValidated = { version: CACHE_VERSION, channels: working, validatedAt: Date.now() };
+      try {
+        fs.writeFileSync(WORKING_FILE, JSON.stringify(iptvValidated));
+      } catch (e) { console.log('[iptv] 写入验证缓存失败:', e.message); }
+    }
+  } finally {
+    iptvValidating = false;
   }
 }
 
