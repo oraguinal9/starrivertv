@@ -254,10 +254,10 @@ async function startPlay() {
     video.removeAttribute('src');
     video.load();
 
-    // HTTP 流通过服务器代理（解决 HTTPS 页面混合内容问题）
-    let playUrl = url.startsWith('http://') ? '/play/' + encodeURIComponent(url) : url;
-    // 代理流需要带鉴权参数（站点设置了 PASSWORD 时避免 401）
-    if (playUrl.startsWith('/play/') && window.ProxyAuth && window.ProxyAuth.addAuthToProxyUrl) {
+    // 所有直播流统一经服务器代理（解决 HTTPS 混合内容 + 服务器直连/中转可访问国内外CDN）
+    let playUrl = '/play/?url=' + encodeURIComponent(url);
+    // 代理请求需要带鉴权参数（站点设置了 PASSWORD 时避免 401）
+    if (window.ProxyAuth && window.ProxyAuth.addAuthToProxyUrl) {
         playUrl = await window.ProxyAuth.addAuthToProxyUrl(playUrl);
     }
 

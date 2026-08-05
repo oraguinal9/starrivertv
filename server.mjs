@@ -300,47 +300,64 @@ app.use('/proxy', async (req, res) => {
 });
 
 // 直播流代理 — 解决 iOS/HTTPS 页面无法播放 HTTP IPTV 流的混合内容问题
+// 直连优先（国际CDN），失败自动切换阿里云中转（国内CDN，香港服务器必需）
 // 自动重写 m3u8 内相对路径为绝对路径，支持 TS 段转发
+const ALI_PROXY = 'http://114.55.148.70/iptv/proxy?url=';
+
 app.use('/play', async (req, res) => {
   if (req.method !== 'GET') return res.status(405).end();
   if (!validateProxyAuth(req)) return res.status(401).json({ error: '未授权' });
 
   try {
-    // 解码目标URL（去掉 /play/ 前缀）
-    const encodedUrl = req.path.substring(1); // app.use('/play') → req.path=/encodedUrl
+    // 兼容两种格式：/play/ENCODED_URL 和 /play/?url=ENCODED_URL
+    const encodedUrl = req.query.url || req.path.substring(1);
     if (!encodedUrl || encodedUrl === '/') return res.status(400).send('Missing URL');
     const targetUrl = decodeURIComponent(encodedUrl);
     if (!isValidUrl(targetUrl)) return res.status(400).send('Invalid URL');
 
-    const response = await axios({
-      method: 'get', url: targetUrl, timeout: 20000,
-      responseType: 'arraybuffer',
-      headers: { 'User-Agent': config.userAgent }
-    });
+    // 直连优先，失败或返回HTML时走阿里云中转
+    let response = null;
+    try {
+      const r = await axios({ method: 'get', url: targetUrl, timeout: 6000,
+        responseType: 'arraybuffer',
+        headers: { 'User-Agent': config.userAgent },
+        validateStatus: s => s >= 200 && s < 400 });
+      const ct = (r.headers['content-type'] || '').toLowerCase();
+      if (!ct.includes('text/html')) response = r;
+    } catch (e) { /* 直连失败，走中转 */ }
+    if (!response) {
+      response = await axios({
+        method: 'get', url: ALI_PROXY + encodeURIComponent(targetUrl), timeout: 20000,
+        responseType: 'arraybuffer',
+        headers: { 'User-Agent': config.userAgent }
+      });
+    }
 
     const contentType = response.headers['content-type'] || '';
     const isM3u8 = contentType.includes('m3u8') || contentType.includes('vnd.apple') ||
                    targetUrl.endsWith('.m3u8');
 
     if (isM3u8) {
-      // 重写 m3u8：相对路径/绝对 http 路径 → 经代理
       // 把请求自带的鉴权参数透传给分片URL，避免 hls.js 拉取分片时 401
       const authQS = (req.query && req.query.auth)
-        ? '?auth=' + encodeURIComponent(req.query.auth) + '&t=' + encodeURIComponent(req.query.t || '')
+        ? '&auth=' + encodeURIComponent(req.query.auth) + '&t=' + encodeURIComponent(req.query.t || '')
         : '';
       const basePath = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
       let playlist = Buffer.from(response.data).toString('utf8');
       const lines = playlist.split('\n');
       const rewritten = lines.map(line => {
         const trimmed = line.trim();
+        // 阿里云代理返回 /iptv/proxy?url=... → 重写为 /play/?url=...
+        if (trimmed.startsWith('/iptv/proxy?url=')) {
+          return '/play/?url=' + trimmed.slice(16) + authQS;
+        }
         if (trimmed && !trimmed.startsWith('#')) {
           if (/^https?:\/\//i.test(trimmed)) {
-            // 绝对 http 地址走代理（避免 HTTPS 页面混合内容）；https 地址直连
-            return trimmed.startsWith('http://') ? '/play/' + encodeURIComponent(trimmed) + authQS : trimmed;
+            // 绝对地址统一经代理（服务器中转可访问国内外CDN）
+            return '/play/?url=' + encodeURIComponent(trimmed) + authQS;
           }
-          // 相对路径 → 绝对URL → 代理
           const absUrl = basePath + trimmed;
-          return '/play/' + encodeURIComponent(absUrl) + authQS;
+          return '/play/?url=' + encodeURIComponent(absUrl) + authQS;
         }
         return line;
       });
@@ -511,21 +528,25 @@ ${urlEntries.join('\n')}
 });
 
 // ============================================================
-// IPTV 电视直播 — 聚合多个开源直播源，按频道名去重并验证可用性
+// IPTV 电视直播 — 多源聚合 + HTTPS升级 + 中转验证 + 多线路备用
 // ============================================================
 let iptvCache = { channels: [], time: 0, status: 'idle' };
 let iptvRefreshing = false;
 let iptvValidated = { channels: [], validatedAt: 0 };   // 验证结果内存缓存
-const IPTV_TTL = 24 * 60 * 60 * 1000;                   // 原始列表缓存24小时
+const IPTV_TTL = 12 * 60 * 60 * 1000;                   // 原始列表缓存12小时
 const VALIDATED_TTL = 6 * 60 * 60 * 1000;               // 验证结果复用6小时
 const WORKING_FILE = '/tmp/iptv_working.json';
-const CACHE_VERSION = 5;                                // 验证缓存格式版本，升级后旧缓存作废重新验证
-// 按优先级排列：IPv4 稳定源优先，IPv6 源兜底（国内宽带大多无 IPv6）
+const CACHE_VERSION = 7;                                // 验证缓存格式版本，升级后旧缓存作废重新验证
+// 按优先级排列：主力大源在前，IPv4/IPv6 互补，多源冗余
 const IPTV_SOURCES = [
-  { key: 'wwb521',  url: 'https://raw.githubusercontent.com/wwb521/live/main/tv.m3u',                priority: 1 },
-  { key: 'iptvorg', url: 'https://iptv-org.github.io/iptv/countries/cn.m3u',                        priority: 2 }, // 官方公开地址，精选带台标
-  { key: 'iptvorg', url: 'https://raw.githubusercontent.com/iptv-org/iptv/master/streams/cn.m3u',   priority: 3 }, // raw 补充覆盖
-  { key: 'fanming', url: 'https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u', priority: 4 },
+  { key: 'ccsh',      url: 'https://raw.githubusercontent.com/CCSH/IPTV/refs/heads/main/live_lite.m3u', priority: 1 }, // 主力源 ~1979频道
+  { key: 'zbds',      url: 'https://live.zbds.top/tv/iptv4.m3u',                                                priority: 2 },
+  { key: 'iptvorg',   url: 'https://iptv-org.github.io/iptv/countries/cn.m3u',                                priority: 3 }, // 官方公开地址
+  { key: 'iptvorg',   url: 'https://raw.githubusercontent.com/iptv-org/iptv/master/streams/cn.m3u',           priority: 4 },
+  { key: 'fanming',   url: 'https://live.fanmingming.com/tv/m3u/ipv6.m3u',                                    priority: 5 },
+  { key: 'fanming',   url: 'https://m3u.ibert.me/fmml_ipv6.m3u',                                               priority: 6 },
+  { key: 'kimentanm', url: 'https://raw.githubusercontent.com/Kimentanm/aptv/master/m3u/iptv.m3u',            priority: 7 },
+  { key: 'wwb521',    url: 'https://raw.githubusercontent.com/wwb521/live/main/tv.m3u',                       priority: 8 },
 ];
 
 // 解析 m3u 列表，提取频道信息
@@ -661,7 +682,7 @@ async function refreshIPTV() {
       }
     });
     // 源大量失败时保留上次缓存，避免用残缺数据覆盖好列表
-    if (okCount < 2 && iptvCache.channels.length > 0) {
+    if (okCount < 3 && iptvCache.channels.length > 0) {
       iptvCache.status = 'degraded';
       console.warn(`[iptv] 仅 ${okCount}/${IPTV_SOURCES.length} 个源可用，保留上次缓存 (${iptvCache.channels.length} 个频道)`);
       return;
@@ -685,26 +706,74 @@ async function refreshIPTV() {
   }
 }
 
-// 单条线路探测：HEAD 优先，失败后用 GET(Range) 兜底；HTML 错误页视为不可用
-async function probeUrl(u) {
+// 单条线路探测：HTTPS升级 → 直连优先 → 阿里云中转兜底（香港服务器访问国内CDN必需）
+// 内容校验（必须有播放列表标记，不能是HTML错误页）+ 坏源/IP过滤
+async function probeStream(u) {
+  // 1. HTTP → HTTPS 升级探测
+  let url = u;
+  if (url.startsWith('http://')) {
+    const httpsUrl = url.replace('http://', 'https://');
+    try {
+      const r = await axios({ method: 'head', url: httpsUrl, timeout: 2000,
+        headers: { 'User-Agent': config.userAgent },
+        validateStatus: s => s < 400 });
+      if (r.status < 400) url = httpsUrl;
+    } catch (e) { /* HTTPS不可用，保持HTTP */ }
+  }
+
+  // 2. 直连优先，失败走阿里云中转
+  let resp = null, viaRelay = false;
   try {
-    const r = await axios({ method: 'head', url: u, timeout: 4000,
+    const r = await axios({ method: 'get', url, timeout: 6000,
+      responseType: 'text', maxContentLength: 524288,
       headers: { 'User-Agent': config.userAgent },
-      validateStatus: s => [200, 206, 301, 302, 403].includes(s) });
+      validateStatus: s => s >= 200 && s < 400 });
     const ct = (r.headers['content-type'] || '').toLowerCase();
-    if (ct.includes('text/html')) return false;
-    return true;
-  } catch (e) { /* fallthrough to GET */ }
-  try {
-    const r = await axios({ method: 'get', url: u, timeout: 3000,
-      responseType: 'arraybuffer', maxContentLength: 65536,
-      headers: { 'User-Agent': config.userAgent, Range: 'bytes=0-0' },
-      validateStatus: s => [200, 206, 301, 302, 403].includes(s) });
-    const ct = (r.headers['content-type'] || '').toLowerCase();
-    if (ct.includes('text/html')) return false;
-    return true;
-  } catch (e) { /* dead */ }
-  return false;
+    if (!ct.includes('text/html')) resp = r;
+  } catch (e) { /* 直连失败 */ }
+  if (!resp) {
+    try {
+      const r = await axios({ method: 'get', url: ALI_PROXY + encodeURIComponent(url), timeout: 10000,
+        responseType: 'text', maxContentLength: 524288,
+        headers: { 'User-Agent': config.userAgent },
+        validateStatus: s => [200, 206].includes(s) });
+      resp = r; viaRelay = true;
+    } catch (e) { /* dead */ }
+  }
+  if (!resp) return null;
+
+  // 3. 内容校验：必须是播放列表，不能是HTML错误页
+  const m3u8 = resp.data || '';
+  if (m3u8.length < 30) return null;
+  if (m3u8.includes('<html') || m3u8.includes('<!DOCTYPE')) return null;
+  if (!m3u8.includes('#EXTINF') && !m3u8.includes('#EXT-X-')) return null;
+
+  // 4. 坏源过滤：已知失效CDN
+  const badCDNs = ['freetv.fun', 'files4.3y1.xyz', '3y1.xyz', '264788.xyz', '7x9d.cn',
+    'drive.mxmy.net', 'rihou.cc', 'gmcc.net', 'chinamobile.com', 'rrs03.hw', 'ottrrs.hl', '3116598.xyz'];
+  if (badCDNs.some(d => url.includes(d))) return null;
+
+  // 5. 检查首个分片地址：坏CDN / 国内运营商内网IP / IPv6-only
+  const lines = m3u8.split('\n');
+  let firstStream = '';
+  for (const line of lines) {
+    const t = line.trim();
+    if (t && !t.startsWith('#')) { firstStream = t; break; }
+  }
+  if (firstStream && firstStream.startsWith('http')) {
+    if (badCDNs.some(d => firstStream.includes(d))) return null;
+    const ipMatch = firstStream.match(/\/\/(\d{1,3})\./);
+    if (ipMatch) {
+      const b = parseInt(ipMatch[1]);
+      if ([10, 61, 100, 110, 111, 112, 113, 116, 120, 123, 173, 198, 204, 218, 222].includes(b)) return null;
+    }
+    if (firstStream.includes('[2409:') || firstStream.includes('[2408:') || firstStream.includes('[240e:')) return null;
+  }
+
+  // 6. 直连标记：https + CORS 允许
+  const isDirect = !viaRelay && url.startsWith('https://') &&
+    (resp.headers['access-control-allow-origin'] || '') === '*';
+  return { url, direct: isDirect };
 }
 
 // 并发验证频道：逐个探测频道线路，任一线路可用即保留并把可用线路排前
@@ -716,19 +785,25 @@ async function validateIPTVChannels(channels) {
   const test = async (ch) => {
     const urls = (ch.urls && ch.urls.length ? ch.urls : [ch.url]).filter(Boolean);
     for (let k = 0; k < urls.length; k++) {
-      if (!(await probeUrl(urls[k]))) continue;
+      const result = await probeStream(urls[k]);
+      if (!result) continue;
       // 该线路可用：排到首位，其余保留为备用（页面播放失败时自动切换）
       const rest = urls.filter(u => u !== urls[k]);
-      ch.urls = [urls[k], ...rest];
-      ch.url = urls[k];
+      ch.urls = [result.url, ...rest];
+      ch.url = result.url;
+      ch.direct = result.direct;
       if (k === 0) firstOk++; else fallbackOk++;
       working.push(ch);
       return;
     }
   };
-  for (let i = 0; i < channels.length; i += 25) {
-    await Promise.all(channels.slice(i, i + 25).map(test));
+  for (let i = 0; i < channels.length; i += 30) {
+    await Promise.all(channels.slice(i, i + 30).map(test));
   }
+  // 排序：分类 > 直连优先 > 名称
+  const order = { cctv: 0, weishi: 1, difang: 2, shuzi: 3, other: 4 };
+  working.sort((a, b) => (order[a.category] - order[b.category]) ||
+    ((a.direct !== b.direct) ? (a.direct ? -1 : 1) : a.name.localeCompare(b.name, 'zh')));
   console.log(`[iptv] 验证完成: ${working.length}/${channels.length} 可用 (首选${firstOk} 备用${fallbackOk})`);
   if (working.length > 0) {
     iptvValidated = { version: CACHE_VERSION, channels: working, validatedAt: Date.now() };
@@ -754,8 +829,19 @@ app.get('/api/live', async (req, res) => {
     counts,
     updated: iptvCache.time,
     validatedAt: iptvValidated.validatedAt,
-    status: iptvCache.status
+    status: iptvCache.status,
+    validated: iptvValidated.channels.length > 0
   });
+});
+
+// 手动触发频道刷新+验证（无需重启服务）
+app.post('/api/live/refresh', async (req, res) => {
+  try {
+    await refreshIPTV();
+    res.json({ ok: true, message: '刷新已触发，1-3分钟完成验证' });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 // 启动时读取上次验证结果（避免重启后重新验证全部频道）
